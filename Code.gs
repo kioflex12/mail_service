@@ -35,15 +35,15 @@ const DAILY_HOUR = 9;
 const PROCESSED_LABEL = 'MailServiceProcessed';
 const SEARCH_QUERY_EXTRA = 'in:anywhere';
 
-// Бесплатные модели OpenRouter (:free), по порядку. Если первая занята/недоступна —
-// автоматически берётся следующая. Список актуальных — https://openrouter.ai/models?q=free
+// Аварийный список бесплатных моделей — используется, только если не удалось
+// получить актуальный список из API OpenRouter (см. freeModels_). Обычно код
+// сам подтягивает свежие :free-модели, руками этот список править не нужно.
 const MODELS = [
   'qwen/qwen3-next-80b-a3b-instruct:free',
   'openai/gpt-oss-20b:free',
   'google/gemma-4-31b-it:free',
   'nvidia/nemotron-3-super-120b-a12b:free',
-  'meta-llama/llama-3.3-70b-instruct:free',
-  'nousresearch/hermes-3-llama-3.1-405b:free'
+  'meta-llama/llama-3.3-70b-instruct:free'
 ];
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
@@ -331,10 +331,11 @@ function orComplete_(system, user, apiKey, temperature) {
     { role: 'system', content: system },
     { role: 'user', content: user }
   ];
+  const models = freeModels_();
   let lastErr = '';
 
   // Перебираем модели: занятую/недоступную пропускаем, берём следующую.
-  for (let mi = 0; mi < MODELS.length; mi++) {
+  for (let mi = 0; mi < models.length; mi++) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const resp = UrlFetchApp.fetch(OPENROUTER_URL, {
         method: 'post',
@@ -342,7 +343,7 @@ function orComplete_(system, user, apiKey, temperature) {
         headers: { 'Authorization': 'Bearer ' + apiKey, 'X-Title': 'mail-service' },
         muteHttpExceptions: true,
         payload: JSON.stringify({
-          model: MODELS[mi],
+          model: models[mi],
           temperature: (temperature == null ? 0 : temperature),
           messages: messages
         })
@@ -355,24 +356,60 @@ function orComplete_(system, user, apiKey, temperature) {
         const msg = data.choices && data.choices[0] && data.choices[0].message;
         const content = (msg && msg.content) || '';
         if (content.trim()) return content.trim();
-        lastErr = MODELS[mi] + ': пустой ответ';
+        lastErr = models[mi] + ': пустой ответ';
         break; // к следующей модели
       }
 
       // 429/5xx — временно: один короткий ретрай с учётом Retry-After, иначе следующая модель.
       if (code === 429 || code >= 500) {
-        lastErr = 'API ' + code + ' на ' + MODELS[mi];
+        lastErr = 'API ' + code + ' на ' + models[mi];
         const waitMs = retryAfterMs_(text);
         if (attempt === 0 && waitMs > 0 && waitMs <= 8000) { Utilities.sleep(waitMs); continue; }
         break;
       }
 
-      // 400/404 и прочее (напр. модель убрали) — сразу следующая модель.
-      lastErr = 'API ' + code + ' на ' + MODELS[mi] + ': ' + text.slice(0, 150);
+      // 400/404 и прочее (напр. модель недоступна для free) — сразу следующая модель.
+      lastErr = 'API ' + code + ' на ' + models[mi] + ': ' + text.slice(0, 150);
       break;
     }
   }
   throw new Error('OpenRouter: не ответила ни одна из бесплатных моделей. ' + lastErr);
+}
+
+/**
+ * Актуальный список бесплатных чат-моделей OpenRouter (кэш 6 ч).
+ * Тянется из /api/v1/models, поэтому не устаревает при смене :free-слагов.
+ * Фолбэк на зашитый MODELS, если запрос не удался.
+ */
+function freeModels_() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get('freemodels');
+  if (cached) { try { const a = JSON.parse(cached); if (a.length) return a; } catch (e) {} }
+  try {
+    const resp = UrlFetchApp.fetch('https://openrouter.ai/api/v1/models', { muteHttpExceptions: true });
+    if (resp.getResponseCode() === 200) {
+      const data = JSON.parse(resp.getContentText());
+      const ids = (data.data || []).filter(function (m) {
+        const pr = m.pricing || {};
+        return String(m.id).slice(-5) === ':free' &&
+               Number(pr.prompt || 0) === 0 && Number(pr.completion || 0) === 0;
+      }).map(function (m) { return m.id; });
+      const ordered = orderModels_(ids);
+      if (ordered.length) { cache.put('freemodels', JSON.stringify(ordered), 21600); return ordered; }
+    }
+  } catch (e) { Logger.log('freeModels_ error: ' + e); }
+  return MODELS.slice();
+}
+
+/** Упорядочивает бесплатные модели: пригодные для чата — вперёд, спорные (coder/vision/…) — в конец; максимум 8. */
+function orderModels_(ids) {
+  const prefer = ['qwen3-next', 'gpt-oss', 'gemma-4', 'gemma', 'llama-3.3', 'nemotron-3-super', 'hermes', 'mistral', 'deepseek', 'qwen'];
+  const avoid = /coder|vision|-vl|safety|guard|embed|reasoning|tts|whisper|image/i;
+  const good = ids.filter(function (id) { return !avoid.test(id); });
+  const rest = ids.filter(function (id) { return avoid.test(id); });
+  function rank(id) { for (var i = 0; i < prefer.length; i++) { if (id.indexOf(prefer[i]) >= 0) return i; } return prefer.length; }
+  good.sort(function (a, b) { return rank(a) - rank(b); });
+  return good.concat(rest).slice(0, 8);
 }
 
 /** Достаёт паузу перед ретраем (мс) из ошибки OpenRouter/429. 0 если не нашли. */
