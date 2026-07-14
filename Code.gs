@@ -256,15 +256,18 @@ function handleMessage_(msg) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
 
-  // Ручная проверка — командой или кнопкой. Работу НЕ делаем в webhook: ставим
-  // отложенный триггер и мгновенно отвечаем Telegram (иначе он зациклит повтор).
-  // Тихо: без «проверяю»/«нет писем» — придут только важные письма, если найдутся.
-  if (text === '/check' || text === CHECK_BTN) { scheduleDeferredCheck_(); return; }
+  // Ручная проверка — командой или кнопкой. Мгновенно шлём «принял», а тяжёлую
+  // работу выносим в фоновый триггер (иначе Telegram зациклит повтор при 302).
+  if (text === '/check' || text === CHECK_BTN) {
+    tgSend_(c.telegramToken, chatId, '🔄 Принял, проверяю почту…');
+    scheduleDeferredCheck_();
+    return;
+  }
 
   if (text === '/start') {
     tgSend_(c.telegramToken, chatId,
-      'Привет! Я присылаю важные письма из Gmail с кнопками действий. Работаю по расписанию, ' +
-      'а кнопкой ниже (или командой /check) можно запустить проверку вручную — придут только важные письма.',
+      'Привет! Я присылаю важные письма из Gmail с кнопками действий. Работаю по расписанию (~9:00), ' +
+      'а кнопкой ниже (или командой /check) можно проверить вручную — покажу, что взял в работу, и пришлю итог.',
       { keyboard: mainReplyKeyboard_() });
     return;
   }
@@ -288,13 +291,18 @@ function scheduleDeferredCheck_() {
   ScriptApp.newTrigger('deferredCheck').timeBased().after(2000).create();
 }
 
-/** Прогон проверки ВНЕ webhook: doPost отвечает мгновенно, Telegram не зацикливает повтор.
- *  Шлёт только важные письма — без статуса «проверяю» и без «новых писем нет». */
+/** Прогон РУЧНОЙ проверки вне webhook: doPost ответил мгновенно, здесь делаем работу
+ *  и шлём итог в чат. (Автоматическая утренняя проверка идёт мимо — без статуса.) */
 function deferredCheck() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'deferredCheck') ScriptApp.deleteTrigger(t);
   });
-  checkImportantMail();
+  const c = cfg_();
+  const r = checkImportantMail() || { scanned: 0, notified: 0 };
+  const msg = r.scanned === 0
+    ? '📭 Новых писем нет.'
+    : '✅ Готово: разобрано ' + r.scanned + ', важных ' + r.notified + '.';
+  if (c.telegramToken && c.chatId) tgSend_(c.telegramToken, c.chatId, msg);
 }
 
 /** Постоянная кнопка ручной проверки над полем ввода. */
