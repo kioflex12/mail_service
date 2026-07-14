@@ -1,0 +1,7 @@
+# clasp (per-machine project binding; contains scriptId, not secrets — но не общее)
+.clasp.json
+
+# прочее
+node_modules/
+.DS_Store
+*.log
