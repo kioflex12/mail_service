@@ -190,11 +190,8 @@ function doPost(e) {
     }
     const update = JSON.parse(e.postData.contents);
 
-    // Дедуп: Telegram может переслать апдейт повторно, если ответ пришёл небыстро.
-    const cache = CacheService.getScriptCache();
-    const uKey = 'u_' + update.update_id;
-    if (cache.get(uKey)) return ContentService.createTextOutput('ok');
-    cache.put(uKey, '1', 120);
+    // Дедуп: Telegram повторяет доставку при 302/таймауте — обрабатываем апдейт ровно один раз.
+    if (alreadyHandled_(update.update_id)) return ContentService.createTextOutput('ok');
 
     if (update.callback_query) handleCallback_(update.callback_query);
     else if (update.message && update.message.text) handleMessage_(update.message);
@@ -202,6 +199,19 @@ function doPost(e) {
     Logger.log('doPost error: ' + err + (err && err.stack ? '\n' + err.stack : ''));
   }
   return ContentService.createTextOutput('ok');
+}
+
+/** Обрабатываем каждый апдейт ровно один раз (Telegram повторяет доставку при 302/таймауте). */
+function alreadyHandled_(updateId) {
+  if (updateId == null) return false;
+  const p = PropertiesService.getScriptProperties();
+  let arr = [];
+  try { arr = JSON.parse(p.getProperty('seen_updates') || '[]'); } catch (e) {}
+  if (arr.indexOf(updateId) >= 0) return true;
+  arr.push(updateId);
+  if (arr.length > 300) arr = arr.slice(-300);
+  p.setProperty('seen_updates', JSON.stringify(arr));
+  return false;
 }
 
 function handleCallback_(cq) {
@@ -246,13 +256,15 @@ function handleMessage_(msg) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
 
-  // Ручная проверка — командой или кнопкой.
-  if (text === '/check' || text === CHECK_BTN) { runManualCheck_(c, chatId); return; }
+  // Ручная проверка — командой или кнопкой. Работу НЕ делаем в webhook: ставим
+  // отложенный триггер и мгновенно отвечаем Telegram (иначе он зациклит повтор).
+  // Тихо: без «проверяю»/«нет писем» — придут только важные письма, если найдутся.
+  if (text === '/check' || text === CHECK_BTN) { scheduleDeferredCheck_(); return; }
 
   if (text === '/start') {
     tgSend_(c.telegramToken, chatId,
       'Привет! Я присылаю важные письма из Gmail с кнопками действий. Работаю по расписанию, ' +
-      'а кнопкой ниже (или командой /check) можно проверить прямо сейчас.',
+      'а кнопкой ниже (или командой /check) можно запустить проверку вручную — придут только важные письма.',
       { keyboard: mainReplyKeyboard_() });
     return;
   }
@@ -268,15 +280,21 @@ function handleMessage_(msg) {
   }
 }
 
-/** Ручной прогон проверки почты из чата (команда /check или кнопка). */
-function runManualCheck_(c, chatId) {
-  tgSend_(c.telegramToken, chatId, '🔄 Проверяю почту…', { keyboard: mainReplyKeyboard_() });
-  const r = checkImportantMail() || { scanned: 0, notified: 0 };
-  if (r.scanned === 0) {
-    tgSend_(c.telegramToken, chatId, '📭 Новых писем для разбора нет.');
-  } else {
-    tgSend_(c.telegramToken, chatId, '✅ Готово: разобрано ' + r.scanned + ', важных ' + r.notified + '.');
-  }
+/** Ставит одноразовый триггер, который через пару секунд тихо прогонит проверку почты. */
+function scheduleDeferredCheck_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'deferredCheck') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('deferredCheck').timeBased().after(2000).create();
+}
+
+/** Прогон проверки ВНЕ webhook: doPost отвечает мгновенно, Telegram не зацикливает повтор.
+ *  Шлёт только важные письма — без статуса «проверяю» и без «новых писем нет». */
+function deferredCheck() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'deferredCheck') ScriptApp.deleteTrigger(t);
+  });
+  checkImportantMail();
 }
 
 /** Постоянная кнопка ручной проверки над полем ввода. */
