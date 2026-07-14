@@ -81,7 +81,7 @@
 | `DAILY_HOUR` | `9` | час запуска (таймзона — `timeZone` в `appsscript.json`) |
 | `LOOKBACK_DAYS` | `2` | за сколько дней смотреть письма |
 | `SEARCH_QUERY_EXTRA` | `in:anywhere` | где искать (`in:inbox` / `category:primary` — уже) |
-| `MODEL` | `meta-llama/llama-3.3-70b-instruct:free` | модель OpenRouter ([список](https://openrouter.ai/models?q=free)) |
+| `MODELS` | список `:free`-моделей | пробуются по порядку с фолбэком при 429/недоступности ([список](https://openrouter.ai/models?q=free)) |
 
 ## Приватность
 - Содержимое писем уходит в OpenRouter (бесплатные модели могут его логировать/использовать провайдером). Для личного фильтра обычно приемлемо; нужен приват — платная модель без логирования.

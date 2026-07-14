@@ -35,8 +35,15 @@ const DAILY_HOUR = 9;
 const PROCESSED_LABEL = 'MailServiceProcessed';
 const SEARCH_QUERY_EXTRA = 'in:anywhere';
 
-// Бесплатная модель OpenRouter (:free). Список — https://openrouter.ai/models?q=free
-const MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
+// Бесплатные модели OpenRouter (:free), по порядку. Если первая занята/недоступна —
+// автоматически берётся следующая. Список актуальных — https://openrouter.ai/models?q=free
+const MODELS = [
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'deepseek/deepseek-chat-v3-0324:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'google/gemma-3-27b-it:free',
+  'meta-llama/llama-3.1-8b-instruct:free'
+];
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const TG_API = 'https://api.telegram.org/bot';
@@ -319,27 +326,62 @@ function onCalendar_(c, chatId, threadId) {
 // ============================================================
 
 function orComplete_(system, user, apiKey, temperature) {
-  const payload = {
-    model: MODEL,
-    temperature: (temperature == null ? 0 : temperature),
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ]
-  };
-  const resp = UrlFetchApp.fetch(OPENROUTER_URL, {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'Authorization': 'Bearer ' + apiKey, 'X-Title': 'mail-service' },
-    muteHttpExceptions: true,
-    payload: JSON.stringify(payload)
-  });
-  const code = resp.getResponseCode();
-  const text = resp.getContentText();
-  if (code !== 200) throw new Error('OpenRouter API ' + code + ': ' + text.slice(0, 400));
-  const data = JSON.parse(text);
-  const msg = data.choices && data.choices[0] && data.choices[0].message;
-  return ((msg && msg.content) || '').trim();
+  const messages = [
+    { role: 'system', content: system },
+    { role: 'user', content: user }
+  ];
+  let lastErr = '';
+
+  // Перебираем модели: занятую/недоступную пропускаем, берём следующую.
+  for (let mi = 0; mi < MODELS.length; mi++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const resp = UrlFetchApp.fetch(OPENROUTER_URL, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { 'Authorization': 'Bearer ' + apiKey, 'X-Title': 'mail-service' },
+        muteHttpExceptions: true,
+        payload: JSON.stringify({
+          model: MODELS[mi],
+          temperature: (temperature == null ? 0 : temperature),
+          messages: messages
+        })
+      });
+      const code = resp.getResponseCode();
+      const text = resp.getContentText();
+
+      if (code === 200) {
+        const data = JSON.parse(text);
+        const msg = data.choices && data.choices[0] && data.choices[0].message;
+        const content = (msg && msg.content) || '';
+        if (content.trim()) return content.trim();
+        lastErr = MODELS[mi] + ': пустой ответ';
+        break; // к следующей модели
+      }
+
+      // 429/5xx — временно: один короткий ретрай с учётом Retry-After, иначе следующая модель.
+      if (code === 429 || code >= 500) {
+        lastErr = 'API ' + code + ' на ' + MODELS[mi];
+        const waitMs = retryAfterMs_(text);
+        if (attempt === 0 && waitMs > 0 && waitMs <= 8000) { Utilities.sleep(waitMs); continue; }
+        break;
+      }
+
+      // 400/404 и прочее (напр. модель убрали) — сразу следующая модель.
+      lastErr = 'API ' + code + ' на ' + MODELS[mi] + ': ' + text.slice(0, 150);
+      break;
+    }
+  }
+  throw new Error('OpenRouter: не ответила ни одна из бесплатных моделей. ' + lastErr);
+}
+
+/** Достаёт паузу перед ретраем (мс) из ошибки OpenRouter/429. 0 если не нашли. */
+function retryAfterMs_(text) {
+  try {
+    const j = JSON.parse(text);
+    const s = j && j.error && j.error.metadata && j.error.metadata.retry_after_seconds;
+    if (s) return Math.ceil(Number(s) * 1000);
+  } catch (e) {}
+  return 1500;
 }
 
 function classifyBatch_(batch, apiKey) {
