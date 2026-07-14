@@ -186,27 +186,32 @@ function handleCallback_(cq) {
   const c = cfg_();
   const token = c.telegramToken;
   const chatId = cq.message && cq.message.chat && cq.message.chat.id;
+  const messageId = cq.message && cq.message.message_id;
   const data = cq.data || '';
   const sep = data.indexOf(':');
   const action = sep >= 0 ? data.slice(0, sep) : data;
   const arg = sep >= 0 ? data.slice(sep + 1) : '';
 
-  tgAnswerCb_(token, cq.id, ''); // гасим «часики» сразу
+  // Гасим «часики» с коротким всплывающим текстом (для долгих действий — «секунду»).
+  let toast = '';
+  if (action === 'gen' || action === 'summ' || action === 'cal') toast = '⏳ Секунду…';
+  else if (action === 'read') toast = '✅ Прочитано';
+  else if (action === 'arch') toast = '📥 В архиве';
+  tgAnswerCb_(token, cq.id, toast);
 
   try {
     switch (action) {
-      case 'gen':   onGenerateReply_(c, chatId, arg); break;
-      case 'send':  onSendReply_(c, chatId, arg); break;
-      case 'gdraft':onSaveDraft_(c, chatId, arg); break;
-      case 'redo':  onRedo_(c, chatId, arg); break;
-      case 'cancel':onCancel_(c, chatId, arg); break;
-      case 'arch':  GmailApp.getThreadById(arg).moveToArchive();
-                    tgSend_(token, chatId, '📥 Письмо в архиве.'); break;
-      case 'read':  GmailApp.getThreadById(arg).markRead();
-                    tgSend_(token, chatId, '✅ Отмечено прочитанным.'); break;
-      case 'summ':  onSummarize_(c, chatId, arg); break;
-      case 'cal':   onCalendar_(c, chatId, arg); break;
-      default:      tgSend_(token, chatId, 'Неизвестное действие.');
+      case 'gen':    onGenerateReply_(c, chatId, arg); break;
+      case 'send':   onSendReply_(c, chatId, arg); break;
+      case 'gdraft': onSaveDraft_(c, chatId, arg); break;
+      case 'redo':   onRedo_(c, chatId, arg); break;
+      case 'cancel': onCancel_(c, chatId, arg); break;
+      // read/архив: делаем в Gmail и убираем карточку из чата
+      case 'arch':   GmailApp.getThreadById(arg).moveToArchive(); tgDelete_(token, chatId, messageId); break;
+      case 'read':   GmailApp.getThreadById(arg).markRead();      tgDelete_(token, chatId, messageId); break;
+      case 'summ':   onSummarize_(c, chatId, arg); break;
+      case 'cal':    onCalendar_(c, chatId, arg); break;
+      default:       tgSend_(token, chatId, 'Неизвестное действие.');
     }
   } catch (err) {
     tgSend_(token, chatId, '⚠️ Не получилось: ' + err);
@@ -263,10 +268,11 @@ function mainReplyKeyboard_() {
 
 function onGenerateReply_(c, chatId, threadId) {
   const email = emailFromThread_(threadId);
+  const mid = tgProgress_(c.telegramToken, chatId, '✍️ Пишу ответ…');
   const draft = generateReply_(email, null, null, c.openrouterKey);
   const id = Utilities.getUuid();
   CacheService.getScriptCache().put('d_' + id, JSON.stringify({ threadId: threadId, draft: draft }), 21600);
-  tgSend_(c.telegramToken, chatId,
+  tgFinish_(c.telegramToken, chatId, mid,
     '✍️ Черновик ответа (тема: ' + email.subject + '):\n\n' + draft,
     { keyboard: draftKeyboard_(id) });
 }
@@ -283,10 +289,11 @@ function onRedoWithText_(c, chatId, id, instructions) {
   if (!raw) { tgSend_(c.telegramToken, chatId, 'Черновик устарел, сгенерируй заново.'); return; }
   const st = JSON.parse(raw);
   const email = emailFromThread_(st.threadId);
+  const mid = tgProgress_(c.telegramToken, chatId, '✍️ Переписываю…');
   const draft = generateReply_(email, st.draft, instructions, c.openrouterKey);
   st.draft = draft;
   CacheService.getScriptCache().put('d_' + id, JSON.stringify(st), 21600);
-  tgSend_(c.telegramToken, chatId, '✍️ Обновлённый черновик:\n\n' + draft, { keyboard: draftKeyboard_(id) });
+  tgFinish_(c.telegramToken, chatId, mid, '✍️ Обновлённый черновик:\n\n' + draft, { keyboard: draftKeyboard_(id) });
 }
 
 function onSendReply_(c, chatId, id) {
@@ -320,14 +327,16 @@ function onCancel_(c, chatId, id) {
 
 function onSummarize_(c, chatId, threadId) {
   const email = emailFromThread_(threadId);
+  const mid = tgProgress_(c.telegramToken, chatId, '🧾 Готовлю саммари…');
   const sys = 'Сожми письмо в 2–4 коротких пункта на русском. Только пункты списком, без вступления.';
   const usr = 'From: ' + email.from + '\nSubject: ' + email.subject + '\n\n' + email.body;
   const out = orComplete_(sys, usr, c.openrouterKey, 0.2);
-  tgSend_(c.telegramToken, chatId, '🧾 Кратко:\n\n' + out);
+  tgFinish_(c.telegramToken, chatId, mid, '🧾 Кратко:\n\n' + out);
 }
 
 function onCalendar_(c, chatId, threadId) {
   const email = emailFromThread_(threadId);
+  const mid = tgProgress_(c.telegramToken, chatId, '📅 Ищу дату в письме…');
   const sys =
     'Извлеки из письма событие (встреча, дедлайн, запись, созвон). Ответь ТОЛЬКО JSON без markdown: ' +
     '{"has_event":<bool>,"title":"<кратко>","start":"YYYY-MM-DD HH:mm","end":"YYYY-MM-DD HH:mm или пусто",' +
@@ -338,18 +347,18 @@ function onCalendar_(c, chatId, threadId) {
   const out = orComplete_(sys, usr, c.openrouterKey, 0);
   const ev = extractJson_(out);
   if (!ev || !ev.has_event || !ev.start) {
-    tgSend_(c.telegramToken, chatId, '📅 Явной даты в письме не нашёл — событие не создал.');
+    tgFinish_(c.telegramToken, chatId, mid, '📅 Явной даты в письме не нашёл — событие не создал.');
     return;
   }
   const start = parseLocal_(ev.start);
-  if (!start) { tgSend_(c.telegramToken, chatId, '📅 Не смог разобрать дату («' + ev.start + '»).'); return; }
+  if (!start) { tgFinish_(c.telegramToken, chatId, mid, '📅 Не смог разобрать дату («' + ev.start + '»).'); return; }
   const end = (ev.end && parseLocal_(ev.end)) || new Date(start.getTime() + 60 * 60 * 1000);
   const title = ev.title || email.subject;
   CalendarApp.getDefaultCalendar().createEvent(title, start, end, {
     location: ev.location || '',
     description: 'Из письма: ' + email.subject + '\n' + email.from
   });
-  tgSend_(c.telegramToken, chatId,
+  tgFinish_(c.telegramToken, chatId, mid,
     '📅 Событие создано: «' + title + '» — ' +
     Utilities.formatDate(start, 'Europe/Moscow', 'dd.MM.yyyy HH:mm'));
 }
@@ -525,6 +534,31 @@ function tgSend_(token, chatId, text, opts) {
 
 function tgAnswerCb_(token, id, text) {
   return tgApi_(token, 'answerCallbackQuery', { callback_query_id: id, text: text || '' });
+}
+
+/** Отправляет «⏳ готовлю…» и возвращает message_id, чтобы потом заменить его результатом. */
+function tgProgress_(token, chatId, text) {
+  const r = tgSend_(token, chatId, text);
+  return r && r.result && r.result.message_id;
+}
+
+/** Заменяет ранее отправленное сообщение результатом (или шлёт новое, если id нет). */
+function tgFinish_(token, chatId, messageId, text, opts) {
+  if (messageId) return tgEdit_(token, chatId, messageId, text, opts);
+  return tgSend_(token, chatId, text, opts);
+}
+
+function tgEdit_(token, chatId, messageId, text, opts) {
+  opts = opts || {};
+  const p = { chat_id: chatId, message_id: messageId, text: String(text).slice(0, 4000), disable_web_page_preview: true };
+  if (opts.html) p.parse_mode = 'HTML';
+  if (opts.keyboard) p.reply_markup = opts.keyboard;
+  return tgApi_(token, 'editMessageText', p);
+}
+
+function tgDelete_(token, chatId, messageId) {
+  if (!messageId) return;
+  return tgApi_(token, 'deleteMessage', { chat_id: chatId, message_id: messageId });
 }
 
 function actionKeyboard_(threadId) {
