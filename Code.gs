@@ -1,17 +1,19 @@
 /**
  * Gmail → Telegram: письма, требующие внимания.
  *
- * Каждое утро проверяет новые письма в Gmail, классифицирует их моделью Google
- * Gemini («требует ли это личного внимания» — работа, личные сообщения, деньги,
- * безопасность, дедлайны, срочные запросы и т.п.) и присылает важное в Telegram-бота.
+ * Каждое утро проверяет новые письма в Gmail, классифицирует их LLM через
+ * OpenRouter («требует ли это личного внимания» — работа, личные сообщения,
+ * деньги, безопасность, дедлайны, срочные запросы и т.п.) и присылает важное
+ * в Telegram-бота.
  *
- * Классификатор — Gemini (бесплатный тариф Google AI Studio: https://aistudio.google.com/apikey).
+ * Классификатор — OpenRouter (бесплатные модели с суффиксом :free,
+ * https://openrouter.ai/keys). Доступен из РФ, обычный TLS.
  *
  * Секреты хранятся в Script Properties (Project Settings → Script properties),
  * НЕ в коде (репозиторий публичный — ключи в код НЕ вставлять):
  *   TELEGRAM_TOKEN      — токен бота от @BotFather
  *   TELEGRAM_CHAT_ID    — id чата, куда слать (см. showMyChatId ниже)
- *   GEMINI_API_KEY      — ключ Google AI Studio (бесплатный)
+ *   OPENROUTER_API_KEY  — ключ OpenRouter (sk-or-v1-...)
  *
  * Разовая настройка: заполнить три свойства → запустить setup() один раз
  * (создаст ежедневный триггер и выдаст OAuth-согласия).
@@ -26,11 +28,12 @@ const DAILY_HOUR = 9;                    // час ежедневного зап
 const PROCESSED_LABEL = 'MailServiceProcessed'; // метка, которой помечаем разобранные письма (защита от повторов)
 const SEARCH_QUERY_EXTRA = 'in:anywhere'; // где искать: in:anywhere = вся почта. Можно сузить до 'in:inbox' или 'category:primary'.
 
-// Модель-классификатор Gemini (бесплатный тариф). gemini-2.5-flash — быстрая и бесплатная.
-// Если упрётся в квоту/недоступность — попробуй 'gemini-2.0-flash'.
-const MODEL = 'gemini-2.5-flash';
+// Бесплатная модель OpenRouter (суффикс :free). Список актуальных бесплатных —
+// https://openrouter.ai/models?q=free. Если модель убрали — просто поменяй строку.
+// Хорошо понимают русский также: 'deepseek/deepseek-chat-v3-0324:free', 'qwen/qwen-2.5-72b-instruct:free'.
+const MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
 
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // ============================================================
 //  РАЗОВАЯ НАСТРОЙКА
@@ -43,9 +46,9 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 function setup() {
   const c = cfg_();
   const missing = [];
-  if (!c.telegramToken) missing.push('TELEGRAM_TOKEN');
-  if (!c.chatId)        missing.push('TELEGRAM_CHAT_ID');
-  if (!c.geminiKey)     missing.push('GEMINI_API_KEY');
+  if (!c.telegramToken)  missing.push('TELEGRAM_TOKEN');
+  if (!c.chatId)         missing.push('TELEGRAM_CHAT_ID');
+  if (!c.openrouterKey)  missing.push('OPENROUTER_API_KEY');
   if (missing.length) {
     throw new Error('Не заполнены Script Properties: ' + missing.join(', ') +
       '. Project Settings → Script properties, затем запусти setup() снова.');
@@ -73,7 +76,7 @@ function setup() {
 
 function checkImportantMail() {
   const c = cfg_();
-  if (!c.telegramToken || !c.chatId || !c.geminiKey) {
+  if (!c.telegramToken || !c.chatId || !c.openrouterKey) {
     Logger.log('⚠️ Не настроено. Заполни Script Properties и запусти setup().');
     return;
   }
@@ -106,7 +109,7 @@ function checkImportantMail() {
     const batch = items.slice(start, start + BATCH_SIZE);
     let verdicts;
     try {
-      verdicts = classifyBatch_(batch, c.geminiKey);
+      verdicts = classifyBatch_(batch, c.openrouterKey);
     } catch (e) {
       Logger.log('❌ Ошибка классификации пачки: ' + e);
       // Пачку не помечаем разобранной — разберём в следующий раз.
@@ -121,14 +124,14 @@ function checkImportantMail() {
       }
       item.thread.addLabel(label); // помечаем разобранным (и важное, и неважное)
     });
-    Utilities.sleep(400); // мягкая пауза между запросами к API
+    Utilities.sleep(500); // мягкая пауза между запросами к API
   }
 
   Logger.log('Разобрано писем: %s, отправлено в Telegram: %s.', items.length, notified);
 }
 
 // ============================================================
-//  КЛАССИФИКАЦИЯ ЧЕРЕЗ GEMINI
+//  КЛАССИФИКАЦИЯ ЧЕРЕЗ OPENROUTER
 // ============================================================
 
 /**
@@ -157,49 +160,30 @@ function classifyBatch_(batch, apiKey) {
     'НЕ важным (is_important=false) считай: массовые рассылки, маркетинг и промо, дайджесты и ' +
     'newsletters, уведомления соцсетей (лайки, подписки, упоминания), автоматический шум, рекламу, ' +
     'чеки-подтверждения без требуемого действия. Ставь is_important=true только если реально стоит ' +
-    'побеспокоить человека. category — короткая метка: work | personal | finance | security | ' +
-    'deadline | urgent | other. reason — одна короткая фраза на русском, почему это важно.';
+    'побеспокоить человека.\n\n' +
+    'Ответь ТОЛЬКО валидным JSON, без markdown и без пояснений, ровно по одному объекту на письмо, ' +
+    'в формате: {"results":[{"i":<индекс письма, int>,"is_important":<bool>,' +
+    '"category":"<work|personal|finance|security|deadline|urgent|other>","reason":"<короткая фраза на русском>"}]}';
 
   const userText =
-    'Классифицируй письма ниже. Верни РОВНО по одному результату на письмо, ' +
-    'сопоставляя по индексу i (0-based):\n\n' + listText;
-
-  // responseSchema Gemini: типы ЗАГЛАВНЫМИ (OBJECT/ARRAY/STRING/INTEGER/BOOLEAN), без additionalProperties.
-  const schema = {
-    type: 'OBJECT',
-    properties: {
-      results: {
-        type: 'ARRAY',
-        items: {
-          type: 'OBJECT',
-          properties: {
-            i: { type: 'INTEGER' },
-            is_important: { type: 'BOOLEAN' },
-            category: { type: 'STRING' },
-            reason: { type: 'STRING' }
-          },
-          required: ['i', 'is_important', 'category', 'reason']
-        }
-      }
-    },
-    required: ['results']
-  };
+    'Классифицируй письма ниже (сопоставляй по индексу i, 0-based):\n\n' + listText;
 
   const payload = {
-    system_instruction: { parts: [{ text: system }] },
-    contents: [{ role: 'user', parts: [{ text: userText }] }],
-    generationConfig: {
-      temperature: 0,
-      responseMimeType: 'application/json',
-      responseSchema: schema
-    }
+    model: MODEL,
+    temperature: 0,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userText }
+    ]
   };
 
-  const url = GEMINI_BASE + MODEL + ':generateContent';
-  const resp = UrlFetchApp.fetch(url, {
+  const resp = UrlFetchApp.fetch(OPENROUTER_URL, {
     method: 'post',
     contentType: 'application/json',
-    headers: { 'x-goog-api-key': apiKey },
+    headers: {
+      'Authorization': 'Bearer ' + apiKey,
+      'X-Title': 'mail-service'
+    },
     muteHttpExceptions: true,
     payload: JSON.stringify(payload)
   });
@@ -207,17 +191,20 @@ function classifyBatch_(batch, apiKey) {
   const code = resp.getResponseCode();
   const text = resp.getContentText();
   if (code !== 200) {
-    throw new Error('Gemini API ' + code + ': ' + text.slice(0, 500));
+    throw new Error('OpenRouter API ' + code + ': ' + text.slice(0, 500));
   }
 
   const data = JSON.parse(text);
-  const cand = (data.candidates || [])[0];
-  const parts = cand && cand.content && cand.content.parts;
-  if (!parts || !parts.length) {
-    throw new Error('Gemini: пустой ответ (' + (cand && cand.finishReason) + '): ' + text.slice(0, 400));
+  const msg = data.choices && data.choices[0] && data.choices[0].message;
+  const content = (msg && msg.content) || '';
+
+  // Достаём JSON-объект из ответа (на случай если модель добавит markdown/текст).
+  const s = content.indexOf('{');
+  const e = content.lastIndexOf('}');
+  if (s < 0 || e <= s) {
+    throw new Error('Модель вернула не JSON: ' + content.slice(0, 300));
   }
-  const outText = parts.map(function (p) { return p.text || ''; }).join('');
-  const parsed = JSON.parse(outText);
+  const parsed = JSON.parse(content.slice(s, e + 1));
 
   // Выравниваем по индексу i на случай, если модель переставит порядок.
   const byIndex = {};
@@ -278,7 +265,7 @@ function cfg_() {
   return {
     telegramToken: p.getProperty('TELEGRAM_TOKEN'),
     chatId: p.getProperty('TELEGRAM_CHAT_ID'),
-    geminiKey: p.getProperty('GEMINI_API_KEY')
+    openrouterKey: p.getProperty('OPENROUTER_API_KEY')
   };
 }
 
@@ -318,15 +305,15 @@ function sendTestMessage() {
 }
 
 /**
- * Разово: проверка ключа Gemini — классифицирует одно тестовое «письмо».
+ * Разово: проверка ключа/модели OpenRouter — классифицирует одно тестовое «письмо».
  */
-function testGemini() {
-  const key = cfg_().geminiKey;
-  if (!key) { Logger.log('Заполни GEMINI_API_KEY в Script Properties.'); return; }
+function testModel() {
+  const key = cfg_().openrouterKey;
+  if (!key) { Logger.log('Заполни OPENROUTER_API_KEY в Script Properties.'); return; }
   const v = classifyBatch_([{
     from: 'HeadHunter <no-reply@hh.ru>',
     subject: 'Ваше резюме заинтересовало работодателя',
     body: 'Здравствуйте! Компания приглашает вас на собеседование.'
   }], key);
-  Logger.log('Gemini ответил: %s', JSON.stringify(v[0]));
+  Logger.log('Модель ответила: %s', JSON.stringify(v[0]));
 }
