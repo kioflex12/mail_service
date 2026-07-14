@@ -49,6 +49,9 @@ const MODELS = [
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const TG_API = 'https://api.telegram.org/bot';
 
+// Текст постоянной кнопки ручной проверки (над полем ввода).
+const CHECK_BTN = '🔄 Проверить почту сейчас';
+
 // ============================================================
 //  РАЗОВАЯ НАСТРОЙКА
 // ============================================================
@@ -87,6 +90,10 @@ function setupWebhook() {
   });
   Logger.log('setWebhook: %s', JSON.stringify(r));
   Logger.log('Webhook URL: %s', hook);
+  tgApi_(c.telegramToken, 'setMyCommands', {
+    commands: [{ command: 'check', description: 'Проверить почту сейчас' }]
+  });
+  Logger.log('Команда /check зарегистрирована в меню бота.');
 }
 
 function getWebhookInfo() {
@@ -105,13 +112,13 @@ function checkImportantMail() {
   const c = cfg_();
   if (!c.telegramToken || !c.chatId || !c.openrouterKey) {
     Logger.log('⚠️ Не настроено. Заполни Script Properties и запусти setup().');
-    return;
+    return { scanned: 0, notified: 0 };
   }
   const label = getOrCreateLabel_();
   const query = 'newer_than:' + LOOKBACK_DAYS + 'd -label:' + PROCESSED_LABEL +
                 (SEARCH_QUERY_EXTRA ? ' ' + SEARCH_QUERY_EXTRA : '');
   const threads = GmailApp.search(query, 0, MAX_THREADS);
-  if (!threads.length) { Logger.log('Новых неразобранных писем нет.'); return; }
+  if (!threads.length) { Logger.log('Новых неразобранных писем нет.'); return { scanned: 0, notified: 0 }; }
 
   const items = threads.map(function (thread) {
     const msgs = thread.getMessages();
@@ -147,6 +154,7 @@ function checkImportantMail() {
     Utilities.sleep(500);
   }
   Logger.log('Разобрано писем: %s, отправлено в Telegram: %s.', items.length, notified);
+  return { scanned: items.length, notified: notified };
 }
 
 // ============================================================
@@ -211,6 +219,17 @@ function handleMessage_(msg) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
 
+  // Ручная проверка — командой или кнопкой.
+  if (text === '/check' || text === CHECK_BTN) { runManualCheck_(c, chatId); return; }
+
+  if (text === '/start') {
+    tgSend_(c.telegramToken, chatId,
+      'Привет! Я присылаю важные письма из Gmail с кнопками действий. Работаю по расписанию, ' +
+      'а кнопкой ниже (или командой /check) можно проверить прямо сейчас.',
+      { keyboard: mainReplyKeyboard_() });
+    return;
+  }
+
   // Ждём ли мы правку для черновика ответа?
   const cache = CacheService.getScriptCache();
   const editKey = 'edit_' + chatId;
@@ -220,9 +239,22 @@ function handleMessage_(msg) {
     onRedoWithText_(c, chatId, draftId, text);
     return;
   }
-  if (text === '/start') {
-    tgSend_(c.telegramToken, chatId, 'Привет! Я присылаю важные письма из Gmail с кнопками действий. Работаю по расписанию.');
+}
+
+/** Ручной прогон проверки почты из чата (команда /check или кнопка). */
+function runManualCheck_(c, chatId) {
+  tgSend_(c.telegramToken, chatId, '🔄 Проверяю почту…', { keyboard: mainReplyKeyboard_() });
+  const r = checkImportantMail() || { scanned: 0, notified: 0 };
+  if (r.scanned === 0) {
+    tgSend_(c.telegramToken, chatId, '📭 Новых писем для разбора нет.');
+  } else {
+    tgSend_(c.telegramToken, chatId, '✅ Готово: разобрано ' + r.scanned + ', важных ' + r.notified + '.');
   }
+}
+
+/** Постоянная кнопка ручной проверки над полем ввода. */
+function mainReplyKeyboard_() {
+  return { keyboard: [[{ text: CHECK_BTN }]], resize_keyboard: true, is_persistent: true };
 }
 
 // ============================================================
