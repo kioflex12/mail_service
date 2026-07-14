@@ -1,15 +1,17 @@
 /**
  * Gmail → Telegram: письма, требующие внимания.
  *
- * Каждое утро проверяет новые письма в Gmail, классифицирует их моделью Claude
- * («требует ли это личного внимания» — работа, личные сообщения, деньги,
+ * Каждое утро проверяет новые письма в Gmail, классифицирует их моделью Google
+ * Gemini («требует ли это личного внимания» — работа, личные сообщения, деньги,
  * безопасность, дедлайны, срочные запросы и т.п.) и присылает важное в Telegram-бота.
  *
+ * Классификатор — Gemini (бесплатный тариф Google AI Studio: https://aistudio.google.com/apikey).
+ *
  * Секреты хранятся в Script Properties (Project Settings → Script properties),
- * НЕ в коде (репозиторий публичный — токен в код НЕ вставлять):
+ * НЕ в коде (репозиторий публичный — ключи в код НЕ вставлять):
  *   TELEGRAM_TOKEN      — токен бота от @BotFather
  *   TELEGRAM_CHAT_ID    — id чата, куда слать (см. showMyChatId ниже)
- *   ANTHROPIC_API_KEY   — ключ Claude API
+ *   GEMINI_API_KEY      — ключ Google AI Studio (бесплатный)
  *
  * Разовая настройка: заполнить три свойства → запустить setup() один раз
  * (создаст ежедневный триггер и выдаст OAuth-согласия).
@@ -24,11 +26,11 @@ const DAILY_HOUR = 9;                    // час ежедневного зап
 const PROCESSED_LABEL = 'MailServiceProcessed'; // метка, которой помечаем разобранные письма (защита от повторов)
 const SEARCH_QUERY_EXTRA = 'in:anywhere'; // где искать: in:anywhere = вся почта. Можно сузить до 'in:inbox' или 'category:primary'.
 
-// Модель-классификатор. Haiku 4.5 — дёшево и быстро для задачи «важно / не важно».
-// Хочешь максимум качества — поставь 'claude-opus-4-8' или 'claude-sonnet-5' (дороже).
-const MODEL = 'claude-haiku-4-5';
+// Модель-классификатор Gemini (бесплатный тариф). gemini-2.5-flash — быстрая и бесплатная.
+// Если упрётся в квоту/недоступность — попробуй 'gemini-2.0-flash'.
+const MODEL = 'gemini-2.5-flash';
 
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
 // ============================================================
 //  РАЗОВАЯ НАСТРОЙКА
@@ -43,7 +45,7 @@ function setup() {
   const missing = [];
   if (!c.telegramToken) missing.push('TELEGRAM_TOKEN');
   if (!c.chatId)        missing.push('TELEGRAM_CHAT_ID');
-  if (!c.anthropicKey)  missing.push('ANTHROPIC_API_KEY');
+  if (!c.geminiKey)     missing.push('GEMINI_API_KEY');
   if (missing.length) {
     throw new Error('Не заполнены Script Properties: ' + missing.join(', ') +
       '. Project Settings → Script properties, затем запусти setup() снова.');
@@ -71,7 +73,7 @@ function setup() {
 
 function checkImportantMail() {
   const c = cfg_();
-  if (!c.telegramToken || !c.chatId || !c.anthropicKey) {
+  if (!c.telegramToken || !c.chatId || !c.geminiKey) {
     Logger.log('⚠️ Не настроено. Заполни Script Properties и запусти setup().');
     return;
   }
@@ -104,7 +106,7 @@ function checkImportantMail() {
     const batch = items.slice(start, start + BATCH_SIZE);
     let verdicts;
     try {
-      verdicts = classifyBatch_(batch, c.anthropicKey);
+      verdicts = classifyBatch_(batch, c.geminiKey);
     } catch (e) {
       Logger.log('❌ Ошибка классификации пачки: ' + e);
       // Пачку не помечаем разобранной — разберём в следующий раз.
@@ -119,14 +121,14 @@ function checkImportantMail() {
       }
       item.thread.addLabel(label); // помечаем разобранным (и важное, и неважное)
     });
-    Utilities.sleep(300); // мягкая пауза между запросами к API
+    Utilities.sleep(400); // мягкая пауза между запросами к API
   }
 
   Logger.log('Разобрано писем: %s, отправлено в Telegram: %s.', items.length, notified);
 }
 
 // ============================================================
-//  КЛАССИФИКАЦИЯ ЧЕРЕЗ CLAUDE
+//  КЛАССИФИКАЦИЯ ЧЕРЕЗ GEMINI
 // ============================================================
 
 /**
@@ -162,40 +164,42 @@ function classifyBatch_(batch, apiKey) {
     'Классифицируй письма ниже. Верни РОВНО по одному результату на письмо, ' +
     'сопоставляя по индексу i (0-based):\n\n' + listText;
 
+  // responseSchema Gemini: типы ЗАГЛАВНЫМИ (OBJECT/ARRAY/STRING/INTEGER/BOOLEAN), без additionalProperties.
   const schema = {
-    type: 'object',
-    additionalProperties: false,
-    required: ['results'],
+    type: 'OBJECT',
     properties: {
       results: {
-        type: 'array',
+        type: 'ARRAY',
         items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['i', 'is_important', 'category', 'reason'],
+          type: 'OBJECT',
           properties: {
-            i: { type: 'integer' },
-            is_important: { type: 'boolean' },
-            category: { type: 'string' }, // work | personal | finance | security | deadline | urgent | other
-            reason: { type: 'string' }
-          }
+            i: { type: 'INTEGER' },
+            is_important: { type: 'BOOLEAN' },
+            category: { type: 'STRING' },
+            reason: { type: 'STRING' }
+          },
+          required: ['i', 'is_important', 'category', 'reason']
         }
       }
-    }
+    },
+    required: ['results']
   };
 
   const payload = {
-    model: MODEL,
-    max_tokens: 2048,
-    system: system,
-    output_config: { format: { type: 'json_schema', schema: schema } },
-    messages: [{ role: 'user', content: userText }]
+    system_instruction: { parts: [{ text: system }] },
+    contents: [{ role: 'user', parts: [{ text: userText }] }],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: 'application/json',
+      responseSchema: schema
+    }
   };
 
-  const resp = UrlFetchApp.fetch(ANTHROPIC_URL, {
+  const url = GEMINI_BASE + MODEL + ':generateContent';
+  const resp = UrlFetchApp.fetch(url, {
     method: 'post',
     contentType: 'application/json',
-    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    headers: { 'x-goog-api-key': apiKey },
     muteHttpExceptions: true,
     payload: JSON.stringify(payload)
   });
@@ -203,14 +207,16 @@ function classifyBatch_(batch, apiKey) {
   const code = resp.getResponseCode();
   const text = resp.getContentText();
   if (code !== 200) {
-    throw new Error('Anthropic API ' + code + ': ' + text.slice(0, 500));
+    throw new Error('Gemini API ' + code + ': ' + text.slice(0, 500));
   }
 
   const data = JSON.parse(text);
-  const outText = (data.content || [])
-    .filter(function (b) { return b.type === 'text'; })
-    .map(function (b) { return b.text; })
-    .join('');
+  const cand = (data.candidates || [])[0];
+  const parts = cand && cand.content && cand.content.parts;
+  if (!parts || !parts.length) {
+    throw new Error('Gemini: пустой ответ (' + (cand && cand.finishReason) + '): ' + text.slice(0, 400));
+  }
+  const outText = parts.map(function (p) { return p.text || ''; }).join('');
   const parsed = JSON.parse(outText);
 
   // Выравниваем по индексу i на случай, если модель переставит порядок.
@@ -272,7 +278,7 @@ function cfg_() {
   return {
     telegramToken: p.getProperty('TELEGRAM_TOKEN'),
     chatId: p.getProperty('TELEGRAM_CHAT_ID'),
-    anthropicKey: p.getProperty('ANTHROPIC_API_KEY')
+    geminiKey: p.getProperty('GEMINI_API_KEY')
   };
 }
 
@@ -309,4 +315,18 @@ function sendTestMessage() {
   if (!c.telegramToken || !c.chatId) { Logger.log('Заполни TELEGRAM_TOKEN и TELEGRAM_CHAT_ID.'); return; }
   sendTelegram_(c, '✅ Тест: бот mail-service подключён и умеет писать сюда.');
   Logger.log('Отправлено. Проверь Telegram.');
+}
+
+/**
+ * Разово: проверка ключа Gemini — классифицирует одно тестовое «письмо».
+ */
+function testGemini() {
+  const key = cfg_().geminiKey;
+  if (!key) { Logger.log('Заполни GEMINI_API_KEY в Script Properties.'); return; }
+  const v = classifyBatch_([{
+    from: 'HeadHunter <no-reply@hh.ru>',
+    subject: 'Ваше резюме заинтересовало работодателя',
+    body: 'Здравствуйте! Компания приглашает вас на собеседование.'
+  }], key);
+  Logger.log('Gemini ответил: %s', JSON.stringify(v[0]));
 }
