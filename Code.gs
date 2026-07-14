@@ -589,10 +589,18 @@ function getSecret_() {
 }
 
 function getWebAppUrl_() {
-  const p = PropertiesService.getScriptProperties().getProperty('WEBAPP_URL');
-  if (p) return p;
-  const u = ScriptApp.getService().getUrl();
-  if (!u) throw new Error('Нет URL Web App. Задеплой как Web App и впиши /exec URL в Script property WEBAPP_URL.');
+  let u = PropertiesService.getScriptProperties().getProperty('WEBAPP_URL') || '';
+  if (!u) u = ScriptApp.getService().getUrl() || '';
+  u = u.split('?')[0].trim(); // убираем query, чтобы не задвоился ?s=
+  if (!u) {
+    throw new Error('Нет URL Web App. Deploy → New deployment → Web app (Access: Anyone), ' +
+                    'скопируй /exec URL и впиши в Script property WEBAPP_URL.');
+  }
+  if (/\/dev$/.test(u)) {
+    throw new Error('Это /dev-URL — Telegram получит 401. Нужен /exec: Deploy → New deployment → ' +
+                    'Web app (Access: Anyone), скопируй адрес, оканчивающийся на /exec, ' +
+                    'и впиши его в Script property WEBAPP_URL, затем запусти setupWebhook снова.');
+  }
   return u;
 }
 
