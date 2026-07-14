@@ -161,6 +161,11 @@ function checkImportantMail() {
 //  WEBHOOK (нажатия кнопок и текстовые сообщения)
 // ============================================================
 
+function doGet(e) {
+  // Ответ для проверки в браузере, что деплой живой и доступен анонимно.
+  return ContentService.createTextOutput('mail-service is running');
+}
+
 function doPost(e) {
   try {
     if (!e || !e.parameter || e.parameter.s !== getSecret_()) {
