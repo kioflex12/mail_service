@@ -2,8 +2,13 @@
   "timeZone": "Europe/Moscow",
   "runtimeVersion": "V8",
   "exceptionLogging": "STACKDRIVER",
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  },
   "oauthScopes": [
-    "https://www.googleapis.com/auth/gmail.modify",
+    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/script.external_request",
     "https://www.googleapis.com/auth/script.scriptapp"
   ]
