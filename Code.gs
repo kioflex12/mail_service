@@ -38,11 +38,12 @@ const SEARCH_QUERY_EXTRA = 'in:anywhere';
 // Бесплатные модели OpenRouter (:free), по порядку. Если первая занята/недоступна —
 // автоматически берётся следующая. Список актуальных — https://openrouter.ai/models?q=free
 const MODELS = [
+  'qwen/qwen3-next-80b-a3b-instruct:free',
+  'openai/gpt-oss-20b:free',
+  'google/gemma-4-31b-it:free',
+  'nvidia/nemotron-3-super-120b-a12b:free',
   'meta-llama/llama-3.3-70b-instruct:free',
-  'deepseek/deepseek-chat-v3-0324:free',
-  'qwen/qwen-2.5-72b-instruct:free',
-  'google/gemma-3-27b-it:free',
-  'meta-llama/llama-3.1-8b-instruct:free'
+  'nousresearch/hermes-3-llama-3.1-405b:free'
 ];
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
