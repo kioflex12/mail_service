@@ -52,6 +52,11 @@ const TG_API = 'https://api.telegram.org/bot';
 // Текст постоянной кнопки ручной проверки (над полем ввода).
 const CHECK_BTN = '🔄 Проверить почту сейчас';
 
+// URL опубликованного Web App (/exec) — для self-ping «прогрева» (keepWarm),
+// чтобы контейнер не остывал и кнопки отвечали быстрее. Не секрет: POST всё равно
+// требует ?s=<секрет>, а GET (doGet) отдаёт безобидную строку.
+const WEB_APP_EXEC = 'https://script.google.com/macros/s/AKfycbw6ZJcB6GsxLaXW3jim_fvGLJ0ytgI94L5wDWW44gXeLpflpys2HydGURp73duvzxv91g/exec';
+
 // ============================================================
 //  РАЗОВАЯ НАСТРОЙКА
 // ============================================================
@@ -69,8 +74,20 @@ function setup() {
     if (t.getHandlerFunction() === 'checkImportantMail') ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('checkImportantMail').timeBased().everyDays(1).atHour(DAILY_HOUR).create();
+
+  // Прогрев: держим Web App-контейнер тёплым, чтобы кнопки отвечали быстрее (меньше холодных стартов).
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'keepWarm') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('keepWarm').timeBased().everyMinutes(5).create();
+
   getOrCreateLabel_();
-  Logger.log('✅ Ежедневный триггер checkImportantMail поставлен на ~%s:00 (Europe/Moscow).', DAILY_HOUR);
+  Logger.log('✅ Триггеры поставлены: ежедневная проверка ~%s:00 (Europe/Moscow) + прогрев каждые 5 мин.', DAILY_HOUR);
+}
+
+/** Прогрев: пингует свой Web App, чтобы контейнер не «остывал» и кнопки отвечали быстрее. */
+function keepWarm() {
+  try { UrlFetchApp.fetch(WEB_APP_EXEC, { muteHttpExceptions: true }); } catch (e) {}
 }
 
 /**
@@ -211,9 +228,9 @@ function handleCallback_(cq) {
       case 'gdraft': onSaveDraft_(c, chatId, arg); break;
       case 'redo':   onRedo_(c, chatId, arg); break;
       case 'cancel': onCancel_(c, chatId, arg); break;
-      // read/архив: делаем в Gmail и убираем карточку из чата
-      case 'arch':   GmailApp.getThreadById(arg).moveToArchive(); tgDelete_(token, chatId, messageId); break;
-      case 'read':   GmailApp.getThreadById(arg).markRead();      tgDelete_(token, chatId, messageId); break;
+      // read/архив: сначала мгновенно убираем карточку, операцию в Gmail делаем после
+      case 'arch':   tgDelete_(token, chatId, messageId); GmailApp.getThreadById(arg).moveToArchive(); break;
+      case 'read':   tgDelete_(token, chatId, messageId); GmailApp.getThreadById(arg).markRead();      break;
       case 'summ':   onSummarize_(c, chatId, arg); break;
       case 'cal':    onCalendar_(c, chatId, arg); break;
       default:       tgSend_(token, chatId, 'Неизвестное действие.');
