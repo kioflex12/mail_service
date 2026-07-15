@@ -70,24 +70,41 @@ function setup() {
   if (missing.length) {
     throw new Error('Не заполнены Script Properties: ' + missing.join(', ') + '.');
   }
+  // Убираем прежние наши триггеры и ставим заново.
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'checkImportantMail') ScriptApp.deleteTrigger(t);
+    const f = t.getHandlerFunction();
+    if (f === 'checkImportantMail' || f === 'poll' || f === 'keepWarm' || f === 'deferredCheck') {
+      ScriptApp.deleteTrigger(t);
+    }
   });
   ScriptApp.newTrigger('checkImportantMail').timeBased().everyDays(1).atHour(DAILY_HOUR).create();
-
-  // Прогрев: держим Web App-контейнер тёплым, чтобы кнопки отвечали быстрее (меньше холодных стартов).
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'keepWarm') ScriptApp.deleteTrigger(t);
-  });
-  ScriptApp.newTrigger('keepWarm').timeBased().everyMinutes(5).create();
+  ScriptApp.newTrigger('poll').timeBased().everyMinutes(1).create();
 
   getOrCreateLabel_();
-  Logger.log('✅ Триггеры поставлены: ежедневная проверка ~%s:00 (Europe/Moscow) + прогрев каждые 5 мин.', DAILY_HOUR);
+  Logger.log('✅ Готово: ежедневная проверка ~%s:00 (Europe/Moscow) + опрос Telegram каждую минуту.', DAILY_HOUR);
 }
 
-/** Прогрев: пингует свой Web App, чтобы контейнер не «остывал» и кнопки отвечали быстрее. */
-function keepWarm() {
-  try { UrlFetchApp.fetch(WEB_APP_EXEC, { muteHttpExceptions: true }); } catch (e) {}
+/** Опрос Telegram (polling): забираем новые апдейты и обрабатываем.
+ *  Надёжнее webhook на Apps Script — тот отвечает 302-редиректом, который Telegram не принимает. */
+function poll() {
+  const c = cfg_();
+  if (!c.telegramToken) return;
+  const p = PropertiesService.getScriptProperties();
+  let offset = Number(p.getProperty('tg_offset') || '0');
+  let resp;
+  try {
+    resp = tgApi_(c.telegramToken, 'getUpdates',
+      { offset: offset, timeout: 0, allowed_updates: ['message', 'callback_query'] });
+  } catch (e) { Logger.log('poll getUpdates error: ' + e); return; }
+  if (!resp || !resp.ok || !resp.result || !resp.result.length) return;
+  resp.result.forEach(function (update) {
+    try {
+      if (update.callback_query) handleCallback_(update.callback_query);
+      else if (update.message && update.message.text) handleMessage_(update.message);
+    } catch (e) { Logger.log('poll update error: ' + e); }
+    if (update.update_id >= offset) offset = update.update_id + 1;
+  });
+  p.setProperty('tg_offset', String(offset));
 }
 
 /**
@@ -256,11 +273,14 @@ function handleMessage_(msg) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
 
-  // Ручная проверка — командой или кнопкой. Мгновенно шлём «принял», а тяжёлую
-  // работу выносим в фоновый триггер (иначе Telegram зациклит повтор при 302).
+  // Ручная проверка — командой или кнопкой. Выполняется внутри poll() (фоновый триггер,
+  // без таймаута Telegram), поэтому сразу: «принял» → проверка → итог.
   if (text === '/check' || text === CHECK_BTN) {
     tgSend_(c.telegramToken, chatId, '🔄 Принял, проверяю почту…');
-    scheduleDeferredCheck_();
+    const r = checkImportantMail() || { scanned: 0, notified: 0 };
+    tgSend_(c.telegramToken, chatId, r.scanned === 0
+      ? '📭 Новых писем нет.'
+      : '✅ Готово: разобрано ' + r.scanned + ', важных ' + r.notified + '.');
     return;
   }
 
@@ -281,28 +301,6 @@ function handleMessage_(msg) {
     onRedoWithText_(c, chatId, draftId, text);
     return;
   }
-}
-
-/** Ставит одноразовый триггер, который через пару секунд тихо прогонит проверку почты. */
-function scheduleDeferredCheck_() {
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'deferredCheck') ScriptApp.deleteTrigger(t);
-  });
-  ScriptApp.newTrigger('deferredCheck').timeBased().after(2000).create();
-}
-
-/** Прогон РУЧНОЙ проверки вне webhook: doPost ответил мгновенно, здесь делаем работу
- *  и шлём итог в чат. (Автоматическая утренняя проверка идёт мимо — без статуса.) */
-function deferredCheck() {
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'deferredCheck') ScriptApp.deleteTrigger(t);
-  });
-  const c = cfg_();
-  const r = checkImportantMail() || { scanned: 0, notified: 0 };
-  const msg = r.scanned === 0
-    ? '📭 Новых писем нет.'
-    : '✅ Готово: разобрано ' + r.scanned + ', важных ' + r.notified + '.';
-  if (c.telegramToken && c.chatId) tgSend_(c.telegramToken, c.chatId, msg);
 }
 
 /** Постоянная кнопка ручной проверки над полем ввода. */
