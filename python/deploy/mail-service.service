@@ -1,0 +1,17 @@
+[Unit]
+Description=mail-service Telegram bot (Gmail important-mail alerts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Поправь под своего пользователя и путь, куда склонирован репозиторий:
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mail_service/python
+ExecStart=/home/ubuntu/mail_service/python/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+# .env подхватывается автоматически (python-dotenv из WorkingDirectory)
+
+[Install]
+WantedBy=multi-user.target

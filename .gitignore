@@ -1,6 +1,14 @@
 # clasp (per-machine project binding; contains scriptId, not secrets — но не общее)
 .clasp.json
 
+# python — секреты и окружение НЕ коммитим
+python/.env
+python/credentials.json
+python/token.json
+python/.venv/
+__pycache__/
+*.pyc
+
 # прочее
 node_modules/
 .DS_Store
