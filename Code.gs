@@ -87,6 +87,9 @@ function setup() {
 /** Опрос Telegram (polling): забираем новые апдейты и обрабатываем.
  *  Надёжнее webhook на Apps Script — тот отвечает 302-редиректом, который Telegram не принимает. */
 function poll() {
+  // ОТКЛЮЧЕНО: бот переехал на Python (long-polling). Один токен нельзя опрашивать
+  // из двух мест — иначе конфликт getUpdates. GS-опрос выключен на время миграции.
+  return;
   const c = cfg_();
   if (!c.telegramToken) return;
   const p = PropertiesService.getScriptProperties();
