@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from datetime import time as dtime
 
-from telegram import Update
+from telegram import Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -122,10 +122,10 @@ class MailAlertBot:
     async def _dispatch(self, action, arg, query, context) -> None:
         bot = context.bot
         if action == "read":
-            await query.message.delete()
+            await self._safe_remove(query.message)
             await self._service.mark_read(arg)
         elif action == "arch":
-            await query.message.delete()
+            await self._safe_remove(query.message)
             await self._service.archive(arg)
         elif action == "gen":
             msg = await bot.send_message(self._chat_id, "✍️ Пишу ответ…")
@@ -137,7 +137,7 @@ class MailAlertBot:
             await msg.edit_text("🧾 Кратко:\n\n" + await self._service.summarize(arg),
                                 reply_markup=ui.delete_keyboard())
         elif action == "del":
-            await query.message.delete()
+            await self._safe_remove(query.message)
         elif action == "cal":
             msg = await bot.send_message(self._chat_id, "📅 Ищу дату в письме…")
             await msg.edit_text(_calendar_text(await self._service.make_calendar_event(arg)))
@@ -168,6 +168,20 @@ class MailAlertBot:
             await context.bot.send_message(
                 self._chat_id, ui.format_card(email, verdict), parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True, reply_markup=ui.action_keyboard(email.thread_id))
+
+    async def _safe_remove(self, message: Message) -> None:
+        """Удаляет сообщение (анимацию исчезновения рисует клиент Telegram).
+
+        Telegram запрещает боту удалять сообщения старше 48 часов — в этом случае
+        просто снимаем у карточки кнопки, а не роняем хендлер ошибкой.
+        """
+        try:
+            await message.delete()
+        except Exception:  # noqa: BLE001 — старше 48ч / уже удалено: убираем хотя бы кнопки
+            try:
+                await message.edit_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _is_owner(self, update: Update) -> bool:
         return update.effective_chat is not None and update.effective_chat.id == self._chat_id
