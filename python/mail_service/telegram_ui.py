@@ -45,6 +45,11 @@ def main_keyboard() -> ReplyKeyboardMarkup:
                                resize_keyboard=True, is_persistent=True)
 
 
+def delete_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка, которая удаляет собственное сообщение (например, под саммари)."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить", callback_data="del")]])
+
+
 def format_card(email: Email, verdict: Verdict) -> str:
     link = f"https://mail.google.com/mail/u/0/#all/{email.thread_id}"
     snippet = re.sub(r"\s+", " ", email.body)[:300]

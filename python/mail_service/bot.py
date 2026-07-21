@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import time as dtime
 
-from telegram import Update
+from telegram import Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -29,7 +30,7 @@ from .service import MailService
 log = logging.getLogger(__name__)
 
 _TOASTS = {"gen": "⏳ Секунду…", "summ": "⏳ Секунду…", "cal": "⏳ Секунду…",
-           "read": "✅ Прочитано", "arch": "📥 В архиве"}
+           "read": "✅ Прочитано", "arch": "📥 В архиве", "del": "🗑 Удалено"}
 
 
 class MailAlertBot:
@@ -122,10 +123,10 @@ class MailAlertBot:
     async def _dispatch(self, action, arg, query, context) -> None:
         bot = context.bot
         if action == "read":
-            await query.message.delete()
+            await self._poof_delete(query.message)
             await self._service.mark_read(arg)
         elif action == "arch":
-            await query.message.delete()
+            await self._poof_delete(query.message)
             await self._service.archive(arg)
         elif action == "gen":
             msg = await bot.send_message(self._chat_id, "✍️ Пишу ответ…")
@@ -134,7 +135,10 @@ class MailAlertBot:
                                 reply_markup=ui.draft_keyboard(draft_id))
         elif action == "summ":
             msg = await bot.send_message(self._chat_id, "🧾 Готовлю саммари…")
-            await msg.edit_text("🧾 Кратко:\n\n" + await self._service.summarize(arg))
+            await msg.edit_text("🧾 Кратко:\n\n" + await self._service.summarize(arg),
+                                reply_markup=ui.delete_keyboard())
+        elif action == "del":
+            await self._poof_delete(query.message)
         elif action == "cal":
             msg = await bot.send_message(self._chat_id, "📅 Ищу дату в письме…")
             await msg.edit_text(_calendar_text(await self._service.make_calendar_event(arg)))
@@ -165,6 +169,21 @@ class MailAlertBot:
             await context.bot.send_message(
                 self._chat_id, ui.format_card(email, verdict), parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True, reply_markup=ui.action_keyboard(email.thread_id))
+
+    async def _poof_delete(self, message: Message) -> None:
+        """Имитация «исчезновения с эффектом»: сообщение на миг превращается в 💨, затем удаляется.
+
+        Telegram не поддерживает анимацию удаления сообщения — это лучшая доступная имитация.
+        """
+        try:
+            await message.edit_text("💨")
+            await asyncio.sleep(0.5)
+        except Exception:  # noqa: BLE001 — редактировать нечего/уже изменено — просто удаляем
+            pass
+        try:
+            await message.delete()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _is_owner(self, update: Update) -> bool:
         return update.effective_chat is not None and update.effective_chat.id == self._chat_id
