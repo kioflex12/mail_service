@@ -9,6 +9,18 @@ python/.venv/
 __pycache__/
 *.pyc
 
+# yandex cloud function — ключ сервисного аккаунта, стейт деплоя и артефакты сборки
+python/yc_function/.yc-sa-key.json
+python/yc_function/.deploy-state.json
+python/yc_function/.vk-env
+python/yc_function/build/
+
+# cloudflare worker — локальные секреты и артефакты
+cloudflare/node_modules/
+cloudflare/.wrangler/
+cloudflare/.dev.vars
+cloudflare/.deploy-state.json
+
 # прочее
 node_modules/
 .DS_Store
